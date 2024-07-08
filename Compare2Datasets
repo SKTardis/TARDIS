@@ -1,0 +1,98 @@
+import pandas as pd
+import openpyxl
+from fuzzywuzzy import fuzz
+
+import openpyxl
+
+
+def replace_dashes(file_path):
+    # Load the Excel file
+    wb = openpyxl.load_workbook(file_path)
+
+    # Iterate through all sheets
+    for sheet_name in wb.sheetnames:
+        sheet = wb[sheet_name]
+
+        # Iterate through all cells in the sheet
+        for row in sheet.iter_rows():
+            for cell in row:
+                # Check if the cell value contains a long dash
+                if '–' in str(cell.value):
+                    # Replace long dash with short dash
+                    cell.value = str(cell.value).replace('–', '-')
+
+    # Save and close the Excel file
+    wb.save(file_path)
+    wb.close()
+
+
+# Replace 'your_excel_file.xlsx' with the actual path to your Excel file
+replace_dashes('C:\\Temp\\test101.xlsx')
+
+
+def compare_all_sheet_pairs(file_path):
+    # Read all sheets into a dictionary of dataframes
+    all_sheets = pd.read_excel(file_path, sheet_name=None)
+
+    # Define tolerance for numeric differences
+    numeric_tolerance = 1
+
+    # Define fuzziness threshold for ID matching
+    id_fuzziness_threshold = 99
+
+    # Iterate through pairs of sheets
+    for i in range(1, len(all_sheets), 2):
+        sheet1_name = f'Sheet{i}'
+        sheet2_name = f'Sheet{i + 1}'
+
+        sheet1_df = all_sheets[sheet1_name].fillna(0)  # Replace NaN with 0
+        sheet2_df = all_sheets[sheet2_name].fillna(0)  # Replace NaN with 0
+
+        # Fuzzy match IDs and identify differences before merging
+        fuzzy_matched_ids = []
+        for id1 in sheet1_df['ID']:
+            matched_id = None
+            highest_ratio = 0
+            for id2 in sheet2_df['ID']:
+                ratio = fuzz.ratio(str(id1), str(id2))
+                if ratio > highest_ratio and ratio >= id_fuzziness_threshold:
+                    matched_id = id2
+                    highest_ratio = ratio
+            fuzzy_matched_ids.append(matched_id)
+
+        # Add a new column with fuzzy matched IDs to sheet1_df
+        sheet1_df['Fuzzy Matched ID'] = fuzzy_matched_ids
+
+        # Merge dataframes on the fuzzy matched 'ID' column
+        merged_df = pd.merge(sheet1_df, sheet2_df, left_on='Fuzzy Matched ID', right_on='ID', how='outer',
+                             suffixes=('_Sheet1', '_Sheet2'))
+
+        # Create a new column to track the type of difference
+        merged_df['Difference Type'] = 'Identical'
+
+        # Iterate over columns (excluding 'ID') and update the 'Difference Type' column
+        for col in sheet1_df.columns.difference(['ID', 'Fuzzy Matched ID']):
+            if col != 'ID':
+                diff_col = abs(merged_df[f'{col}_Sheet1'] - merged_df[f'{col}_Sheet2'])
+                mask = diff_col > numeric_tolerance
+                merged_df.loc[mask, 'Difference Type'] = 'Numeric'
+
+        # Identify missing records
+        missing_mask_sheet1 = merged_df['Fuzzy Matched ID'].isnull()
+        missing_mask_sheet2 = merged_df['ID_Sheet2'].isnull()
+
+        merged_df.loc[missing_mask_sheet1, 'Difference Type'] = 'Missing_Sheet1'
+        merged_df.loc[missing_mask_sheet2, 'Difference Type'] = 'Missing_Sheet2'
+
+        # Filter rows where 'Difference Type' is not 'Identical'
+        diff_sheet_name = f'{sheet1_name[5:]}{sheet2_name[5:]}Diff'
+        sheet_diff_df = merged_df[merged_df['Difference Type'] != 'Identical'].copy()
+
+        # Write the differences to the new sheet
+        with pd.ExcelWriter(file_path, engine='openpyxl', mode='a') as writer:
+            sheet_diff_df.to_excel(writer, sheet_name=diff_sheet_name, index=False)
+
+
+# Example usage
+excel_file_path = 'C:\\Temp\\test101.xlsx'
+compare_all_sheet_pairs(excel_file_path)

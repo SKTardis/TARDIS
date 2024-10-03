@@ -1,0 +1,69 @@
+import pyspark.pandas as ps
+from pyspark.sql.functions import col, sum
+import difflib
+import string
+from pyspark.sql import SparkSession
+import os
+import shutil
+
+# Read the data using the Pandas API on Spark
+invoices_df = ps.read_csv('dbfs:/mnt/psdc-p/Contracting.csv')
+official_vendors_df = ps.read_csv('dbfs:/mnt/psdc-p/Vendor.csv')
+
+# Convert to lowercase
+invoices_df['Vendor Name'] = invoices_df['Vendor Name'].str.lower()
+official_vendors_df['Vendor Name'] = official_vendors_df['Vendor Name'].str.lower()
+
+# Remove leading and trailing spaces
+invoices_df['Vendor Name'] = invoices_df['Vendor Name'].str.strip()
+official_vendors_df['Vendor Name'] = official_vendors_df['Vendor Name'].str.strip()
+
+# Remove punctuation
+invoices_df['Vendor Name'] = invoices_df['Vendor Name'].str.replace(f"[{string.punctuation}]", "", regex=True)
+official_vendors_df['Vendor Name'] = official_vendors_df['Vendor Name'].str.replace(f"[{string.punctuation}]", "", regex=True)
+
+# Replace _, -, / with a single space
+invoices_df['Vendor Name'] = invoices_df['Vendor Name'].str.replace(r'[_\-/]', ' ', regex=True) 
+official_vendors_df['Vendor Name'] = official_vendors_df['Vendor Name'].str.replace(r'[_\-/]', ' ', regex=True) 
+
+# Remove excessive spacing
+invoices_df['Vendor Name'] = invoices_df['Vendor Name'].str.strip().str.replace(r'\s+', ' ', regex=True)
+official_vendors_df['Vendor Name'] = official_vendors_df['Vendor Name'].str.strip().str.replace(r'\s+', ' ', regex=True)
+
+# Convert the official vendors list to a Pandas-on-Spark Series for matching
+official_vendors_series = official_vendors_df['Vendor Name'].to_list()
+
+# Function to match vendor names using fuzzy matching
+def match_vendor_name(vendor_name, official_vendors):
+    match = difflib.get_close_matches(vendor_name, official_vendors, n=1, cutoff=0.2)
+    return match[0] if match else vendor_name
+
+# Apply matching function outside of Spark context
+invoices_df['Matched Vendor Name'] = invoices_df['Vendor Name'].apply(
+    lambda x: match_vendor_name(x, official_vendors_series)
+)
+
+# Convert to Spark DataFrame
+spark_df = invoices_df.to_spark()
+spark_df.createOrReplaceTempView("payments")
+
+# Perform SQL query
+result_df = spark.sql("""
+                      SELECT `Matched Vendor Name` AS Vendor_Name, 
+                             sum(CAST(REPLACE(`Payment Amount`,',','') AS Double)) AS Total_Payment
+                      FROM payments
+                      GROUP BY Vendor_Name
+                      ORDER BY Vendor_Name
+                      """)
+
+display(result_df)
+
+# Coalesce to a single partition and write the result to a CSV file in Azure Data Lake
+result_df.coalesce(1).write.csv('dbfs:/mnt/psdc-p/aggregated_payments', header=True, mode='overwrite')
+
+print("New CSV file 'aggregated_payments.csv' has been created.")
+
+spark.sql("VACUUM 'dbfs:/mnt/psdc-p/aggregated_payments' RETAIN 0 HOURS")
+
+# Delete the existing directory if it exists
+output_dir = "processed_vendor_list"
